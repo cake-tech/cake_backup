@@ -64,49 +64,29 @@ VersionParameters getVersion(int version) {
   return foundVersion;
 }
 
-/// An exception indicating a bad PBKDF nonce
-class BadPbkdfNonce implements Exception {
-  String errMsg() => 'Bad PBKDF nonce length';
-}
-
-/// An exception indicating a bad AEAD key
-class BadAeadKey implements Exception {
-  String errMsg() => 'Bad AEAD key length';
-}
-
-/// An exception indicating a bad AEAD nonce
-class BadAeadNonce implements Exception {
-  String errMsg() => 'Bad AEAD nonce length';
-}
-
-/// An exception indicating a bad AEAD MAC
-class BadAeadMac implements Exception {
-  String errMsg() => 'Bad AEAD MAC length';
-}
-
 /// An exception indicating incomplete data
 class BadDataLength implements Exception {
-  String errMsg() => 'Bad data length';
+  String errMsg() => 'The backup file is corrupted and could not be recovered (error code: BadDataLength).';
 }
 
 /// An exception indicating an unsupported protocol version
 class BadProtocolVersion implements Exception {
-  String errMsg() => 'Bad protocol version';
+  String errMsg() => 'The backup file uses a version that this software does not understand (error code: BadProtocolVersion).';
 }
 
 /// An exception indicating failed decryption
 class FailedDecryption implements Exception {
-  String errMsg() => 'Failed decryption';
+  String errMsg() => 'The backup file is corrupted and could not be recovered (error code: FailedDecryption).';
 }
 
 /// An exception indicating a bad checksum
 class BadChecksum implements Exception {
-  String errMsg() => 'Bad checksum';
+  String errMsg() => 'The backup file is corrupted and could not be recovered (error code: BadChecksum).';
 }
 
 /// An exception indicating a bad AAD length
 class BadAadLength implements Exception {
-  String errMsg() => 'Bad AAD length';
+  String errMsg() => 'There was an unexpected internal error (error code: BadAadLength).';
 }
 
 /// Class to hold data relevant for decryption
