@@ -6,13 +6,11 @@ import 'package:tuple/tuple.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cake_backup/backup.dart';
 
-/// Utility function to generate random byte lists
-List<int> randomBytes(int size) {
-  var rng = Random.secure();
-  return List<int>.generate(size, (_) => rng.nextInt(0xFF));
-}
-
 void main() {
+  ///
+  /// Version-independent tests
+  /// 
+
   /// All version numbers are valid
   test('version numbers are valid', () {
     // Sanity checks; versions cannot repeat and must fit in a single byte
@@ -25,8 +23,8 @@ void main() {
     }
   });
 
-  /// Correct encryption and decryption succeeds with default version
-  test('success, default version', () async {
+  /// Ensure the default version is correct
+  test('default version', () async {
     const String passphrase = 'passphrase';
     const String plaintext = 'A secret message to be encrypted';
 
@@ -34,23 +32,11 @@ void main() {
     final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
     // Encrypt
-    final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes);
-    PackageData data = raw.item1;
+    final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes);
+    final PackageData data = raw.item1;
 
     // Check the version is the most recent
     expect(data.parameters.version, getAllVersions().map((item) => item.version).reduce(max));
-
-    // Encode
-    final List<int> checksum = await data.parameters.checksum(data);
-    final Uint8List blob = data.encode(checksum);
-
-    // Decrypt
-    final Uint8List decryptedBytes = await decrypt(passphrase, blob);
-
-    // Convert ciphertext
-    final String decrypted = utf8.decode(decryptedBytes);
-
-    expect(decrypted, plaintext);
   });
 
   /// Unsupported version
@@ -62,20 +48,23 @@ void main() {
     final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
     // Encrypt
-    final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes);
-    PackageData data = raw.item1;
+    final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes);
+    final PackageData data = raw.item1;
 
     // Change to an unsupported version
     data.parameters.version = 0;
 
     // Encode with recomputed checksum
-    final List<int> checksum = await data.parameters.checksum(data);
+    final Uint8List checksum = await data.parameters.checksum(data);
     final Uint8List blob = data.encode(checksum);
 
     // Decrypt
     expect(() => decrypt(passphrase, blob), throwsA(isA<BadProtocolVersion>()));
   });
 
+  ///
+  /// Version-dependent tests
+  /// 
   for (int version in getAllVersions().map((item) => item.version)) {
     /// Correct encryption and decryption succeeds
     test('success, version $version', () async {
@@ -113,6 +102,32 @@ void main() {
       expect(() => decrypt(evilPassphrase, blob), throwsA(isA<FailedDecryption>()));
     });
 
+    // Unlinkability
+    test('unlinkability, version $version', () async {
+      const String passphrase = 'passphrase';
+      const String plaintext = 'A secret message to be encrypted';
+
+      // Convert plaintext
+      final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
+
+      // Encrypt twice to simulate multiple backups, even using the same plaintext
+      final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData data = raw.item1;
+      final Uint8List checksum = raw.item2;
+
+      final Tuple2<PackageData, Uint8List> otherRaw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData otherData = otherRaw.item1;
+      final Uint8List otherChecksum = otherRaw.item2;
+
+      // Ensure that each non-version component of the data is distinct across backups, to assert no obvious linkability
+      expect(data.parameters.version, otherData.parameters.version);
+      expect(data.pbkdfSalt, isNot(equals(otherData.pbkdfSalt)));
+      expect(data.aeadNonce, isNot(equals(otherData.aeadNonce)));
+      expect(data.aeadTag, isNot(equals(otherData.aeadTag)));
+      expect(data.ciphertext, isNot(equals(otherData.ciphertext)));
+      expect(checksum, isNot(equals(otherChecksum)));
+    });
+
     /// Evil version
     /// NOTE: In the future, parameter differences may require more hand-tuned tests
     for (int evilVersion in getAllVersions().map((item) => item.version)) {
@@ -129,14 +144,14 @@ void main() {
         final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
         // Encrypt
-        final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
-        PackageData data = raw.item1;
+        final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+        final PackageData data = raw.item1;
 
         // Change to an evil version
         data.parameters = getVersion(evilVersion);
 
         // Encode with recomputed checksum
-        final List<int> checksum = await data.parameters.checksum(data);
+        final Uint8List checksum = await data.parameters.checksum(data);
         final Uint8List blob = data.encode(checksum);
 
         // Decrypt
@@ -144,8 +159,8 @@ void main() {
       });
     }
 
-    /// Evil PBKDF nonce
-    test('evil PBKDF nonce, version $version', () async {
+    /// Evil PBKDF salt 
+    test('evil PBKDF salt, version $version', () async {
       const String passphrase = 'passphrase';
       const String plaintext = 'A secret message to be encrypted';
 
@@ -153,14 +168,14 @@ void main() {
       final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
       // Encrypt
-      final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
-      PackageData data = raw.item1;
+      final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData data = raw.item1;
 
-      // Change to an evil PBKDF nonce
-      data.pbkdfNonce = randomBytes(data.parameters.pbkdfNonceSize);
+      // Change to an evil PBKDF salt
+      data.pbkdfSalt = randomBytes(data.parameters.pbkdfSaltSize);
 
       // Encode with recomputed checksum
-      final List<int> checksum = await data.parameters.checksum(data);
+      final Uint8List checksum = await data.parameters.checksum(data);
       final Uint8List blob = data.encode(checksum);
 
       // Decrypt
@@ -176,14 +191,14 @@ void main() {
       final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
       // Encrypt
-      final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
-      PackageData data = raw.item1;
+      final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData data = raw.item1;
 
       // Change to an evil AEAD nonce
       data.aeadNonce = randomBytes(data.parameters.aeadNonceSize);
 
       // Encode with recomputed checksum
-      final List<int> checksum = await data.parameters.checksum(data);
+      final Uint8List checksum = await data.parameters.checksum(data);
       final Uint8List blob = data.encode(checksum);
 
       // Decrypt
@@ -199,14 +214,14 @@ void main() {
       final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
       // Encrypt
-      final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
-      PackageData data = raw.item1;
+      final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData data = raw.item1;
 
       // Change to an evil AEAD tag
       data.aeadTag = randomBytes(data.parameters.aeadTagSize);
 
       // Encode with recomputed checksum
-      final List<int> checksum = await data.parameters.checksum(data);
+      final Uint8List checksum = await data.parameters.checksum(data);
       final Uint8List blob = data.encode(checksum);
 
       // Decrypt
@@ -222,11 +237,11 @@ void main() {
       final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
       // Encrypt
-      final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
-      PackageData data = raw.item1;
+      final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData data = raw.item1;
 
       // Encode with corrupted checksum
-      final List<int> checksum = randomBytes(data.parameters.checksumSize);
+      final Uint8List checksum = randomBytes(data.parameters.checksumSize);
       final Uint8List blob = data.encode(checksum);
 
       // Decrypt
@@ -242,14 +257,14 @@ void main() {
       final Uint8List plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
 
       // Encrypt
-      final Tuple2<PackageData, List<int>> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
-      PackageData data = raw.item1;
+      final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintextBytes, version: version);
+      final PackageData data = raw.item1;
 
       // Change to an evil ciphertext
       data.ciphertext = randomBytes(data.ciphertext.length);
 
       // Encode with recomputed checksum
-      final List<int> checksum = await data.parameters.checksum(data);
+      final Uint8List checksum = await data.parameters.checksum(data);
       final Uint8List blob = data.encode(checksum);
 
       // Decrypt
@@ -269,7 +284,7 @@ void main() {
 
       // Decrypt with trunated blob
       final VersionParameters parameters = getVersion(version);
-      final int minimumBlobSize = 1 + parameters.pbkdfNonceSize + parameters.aeadNonceSize + parameters.aeadTagSize + parameters.checksumSize;
+      final int minimumBlobSize = 1 + parameters.pbkdfSaltSize + parameters.aeadNonceSize + parameters.aeadTagSize + parameters.checksumSize;
       expect(() => decrypt(passphrase, blob.sublist(0, minimumBlobSize - 1)), throwsA(isA<BadDataLength>()));
     });
 
