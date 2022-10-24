@@ -46,21 +46,21 @@ List<VersionParameters> getAllVersions() {
   const int pbkdf2SaltLength = 16; // Take that, rainbow tables!
   versions.add(VersionParameters(
     version,
-    (passphrase, salt) => _pbkdf2(passphrase, salt, const Hmac(sha512), owaspRecommendedPbkdf2Sha512Iterations, chacha20Poly1305Aead.secretKeyLength),
+    (passphrase, salt) => _pbkdf2(passphrase, salt,  Hmac.sha512(), owaspRecommendedPbkdf2Sha512Iterations, Cryptography.instance.chacha20Poly1305Aead().secretKeyLength),
     (key, nonce, plaintext) => _chaCha20Poly1305Encrypt(key, nonce, plaintext, aad),
     (key, nonce, blob, tag) => _chaCha20Poly1305Decrypt(key, nonce, blob, tag, aad),
     (data) => _blake2b(data, aad),
     pbkdf2SaltLength,
-    chacha20Poly1305Aead.nonceLength,
-    poly1305.macLength,
-    blake2b.hashLengthInBytes 
+    Cryptography.instance.chacha20Poly1305Aead().nonceLength,
+    Poly1305().macLength,
+    Blake2b().hashLengthInBytes
   ));
 
   return versions;
 }
 
 /// Get parameters for a version
-VersionParameters getVersion(int version) {
+VersionParameters getVersion(int? version) {
   // Get all versions
   final List<VersionParameters> versions = getAllVersions();
 
@@ -200,10 +200,12 @@ Future<Uint8List> _pbkdf2(String passphrase, Uint8List nonce, MacAlgorithm macAl
     iterations: iterations,
     bits: derivedKeyLength * 8 // bits
   );
-  return await pbkdf.deriveBits(
-    utf8.encode(passphrase),
-    nonce: Nonce(nonce)
+  final SecretKey secKey = await pbkdf.deriveKey(
+    secretKey: SecretKey(utf8.encode(passphrase)),
+    nonce: nonce.toList()
   );
+  final bytes = await secKey.extractBytes();
+  return Uint8List.fromList(bytes);
 }
 
 //
@@ -212,15 +214,15 @@ Future<Uint8List> _pbkdf2(String passphrase, Uint8List nonce, MacAlgorithm macAl
 
 /// ChaCha20-Poly1305 encryption
 Future<Tuple2<Uint8List, Uint8List>> _chaCha20Poly1305Encrypt(Uint8List key, Uint8List nonce, Uint8List plaintext, String aad) async {
-  final Uint8List data = await chacha20Poly1305Aead.encrypt(
-    plaintext,
-    secretKey: SecretKey(key),
-    nonce: Nonce(nonce),
+  final SecretBox box = await Cryptography.instance.chacha20Poly1305Aead().encrypt(
+    plaintext.toList(),
+    secretKey: SecretKey(key.toList()),
+    nonce: nonce,
     aad: utf8.encode(aad)
   );
 
-  final Uint8List ciphertext = Uint8List.fromList(chacha20Poly1305Aead.getDataInCipherText(data));
-  final Uint8List tag = Uint8List.fromList(chacha20Poly1305Aead.getMacInCipherText(data).bytes);
+  final Uint8List ciphertext = Uint8List.fromList(box.cipherText);
+  final Uint8List tag = Uint8List.fromList(box.mac.bytes);
 
   return Tuple2<Uint8List, Uint8List>(ciphertext, tag);
 }
@@ -228,15 +230,17 @@ Future<Tuple2<Uint8List, Uint8List>> _chaCha20Poly1305Encrypt(Uint8List key, Uin
 /// ChaCha20-Poly1305 decryption
 Future<Uint8List> _chaCha20Poly1305Decrypt(Uint8List key, Uint8List nonce, Uint8List blob, Uint8List tag, String aad) async {
   try {
-    final Uint8List plaintext = await chacha20Poly1305Aead.decrypt(
-      blob + tag,
+    final List<int> plaintext = await Cryptography.instance.chacha20Poly1305Aead().decrypt(
+      SecretBox(
+        blob.toList(),
+        nonce: nonce,
+        mac: Mac(tag)),
       secretKey: SecretKey(key),
-      nonce: Nonce(nonce),
       aad: utf8.encode(aad)
     );
 
-    return plaintext;
-  } on MacValidationException {
+    return Uint8List.fromList(plaintext);
+  } catch(_) {
     throw FailedDecryption();
   }
 }
@@ -252,7 +256,7 @@ Future<Uint8List> _blake2b(PackageData data, String aad) async {
     throw BadAadLength();
   }
   
-  final HashSink streamer = blake2b.newSink();
+  final HashSink streamer = Blake2b().newHashSink();
   streamer.add(<int>[aad.length]);
   streamer.add(utf8.encode(aad));
   streamer.add(<int>[data.parameters.version]);
@@ -261,7 +265,7 @@ Future<Uint8List> _blake2b(PackageData data, String aad) async {
   streamer.add(data.aeadTag);
   streamer.add(data.ciphertext);
   streamer.close();
-  final Hash checksum = streamer.hash;
+  final Hash checksum = await streamer.hash();
 
   return Future<Uint8List>(() => Uint8List.fromList(checksum.bytes));
 }
@@ -271,7 +275,7 @@ Future<Uint8List> _blake2b(PackageData data, String aad) async {
 //
 
 /// Encrypt data with a passphrase and return the raw data structure and checksum (useful for testing)
-Future<Tuple2<PackageData, Uint8List>> encryptRaw(String passphrase, Uint8List plaintext, {int version}) async {
+Future<Tuple2<PackageData, Uint8List>> encryptRaw(String passphrase, Uint8List plaintext, {int? version}) async {
   // Get version parameters; this can fail
   final VersionParameters parameters = getVersion(version);
 
@@ -292,7 +296,7 @@ Future<Tuple2<PackageData, Uint8List>> encryptRaw(String passphrase, Uint8List p
 }
 
 /// Encrypt data with a passphrase and return the encoded data
-Future<Uint8List> encrypt(String passphrase, Uint8List plaintext, {int version}) async {
+Future<Uint8List> encrypt(String passphrase, Uint8List plaintext, {int? version}) async {
   final Tuple2<PackageData, Uint8List> raw = await encryptRaw(passphrase, plaintext, version: version);
   final PackageData data = raw.item1;
   final Uint8List checksum = raw.item2;
