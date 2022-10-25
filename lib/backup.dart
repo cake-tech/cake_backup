@@ -38,20 +38,19 @@ List<VersionParameters> getAllVersions() {
   // Version 1 is the legacy system, which is outside of this library's control
   // NOTE: Downgrade attacks may be possible because of this
 
-  // Version 2 uses PBKDF2, ChaCha20-Poly1305, and Blake2
-  // NOTE: We use a random AEAD nonce, which in general can be _unsafe_ for ChaCha20-Poly1305; however, a new PBKDF key is derived on each encryption, so it's safe in this specific design
+  // Version 2 uses PBKDF2, XChaCha20-Poly1305, and Blake2
   version = 2;
   aad = protocol + version.toString();
   const int owaspRecommendedPbkdf2Sha512Iterations = 120000; // OWASP recommendation: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#pbkdf2
   const int pbkdf2SaltLength = 16; // Take that, rainbow tables!
   versions.add(VersionParameters(
     version,
-    (passphrase, salt) => _pbkdf2(passphrase, salt,  Hmac.sha512(), owaspRecommendedPbkdf2Sha512Iterations, Cryptography.instance.chacha20Poly1305Aead().secretKeyLength),
-    (key, nonce, plaintext) => _chaCha20Poly1305Encrypt(key, nonce, plaintext, aad),
-    (key, nonce, blob, tag) => _chaCha20Poly1305Decrypt(key, nonce, blob, tag, aad),
+    (passphrase, salt) => _pbkdf2(passphrase, salt,  Hmac.sha512(), owaspRecommendedPbkdf2Sha512Iterations, Xchacha20.poly1305Aead().secretKeyLength),
+    (key, nonce, plaintext) => _xChaCha20Poly1305Encrypt(key, nonce, plaintext, aad),
+    (key, blob) => _xChaCha20Poly1305Decrypt(key, blob, aad),
     (data) => _blake2b(data, aad),
     pbkdf2SaltLength,
-    Cryptography.instance.chacha20Poly1305Aead().nonceLength,
+    Xchacha20.poly1305Aead().nonceLength,
     Poly1305().macLength,
     Blake2b().hashLengthInBytes
   ));
@@ -127,9 +126,9 @@ class PackageData {
 /// Class to hold data for protocol versions
 class VersionParameters {
   int version;
-  Future<Uint8List> Function(String, Uint8List) pbkdf; // (passphrase, salt) -> (derived_key)
-  Future<Tuple2<Uint8List, Uint8List>> Function(Uint8List, Uint8List, Uint8List) aeadEncrypt; // (key, nonce, plaintext) -> (ciphertext, tag)
-  Future<Uint8List> Function(Uint8List, Uint8List, Uint8List, Uint8List) aeadDecrypt; // (key, nonce, blob, tag) -> (plaintext)
+  Future<Uint8List> Function(Uint8List, Uint8List) pbkdf; // (passphrase, salt)
+  Future<SecretBox> Function(Uint8List, Uint8List, Uint8List) aeadEncrypt; // (key, nonce, plaintext)
+  Future<Uint8List> Function(Uint8List, SecretBox) aeadDecrypt; // (key, blob)
   Future<Uint8List> Function(PackageData) checksum; // (data)
   int pbkdfSaltSize; // PBKDF salt size in bytes
   int aeadNonceSize; // AEAD nonce size in bytes
@@ -194,53 +193,50 @@ Future<PackageData> _parseBytes(Uint8List bytes) async {
 //
 
 /// PBKDF2
-Future<Uint8List> _pbkdf2(String passphrase, Uint8List nonce, MacAlgorithm macAlgorithm, int iterations, int derivedKeyLength) async {
-  final pbkdf = Pbkdf2(
+Future<Uint8List> _pbkdf2(Uint8List passphrase, Uint8List salt, MacAlgorithm macAlgorithm, int iterations, int derivedKeyLength) async {
+  final Pbkdf2 pbkdf = Pbkdf2(
     macAlgorithm: macAlgorithm,
     iterations: iterations,
     bits: derivedKeyLength * 8 // bits
   );
-  final SecretKey secKey = await pbkdf.deriveKey(
-    secretKey: SecretKey(utf8.encode(passphrase)),
-    nonce: nonce.toList()
+  final SecretKey derivedKey = await pbkdf.deriveKey(
+    secretKey: SecretKey(passphrase),
+    nonce: salt
   );
-  final bytes = await secKey.extractBytes();
-  return Uint8List.fromList(bytes);
+  final List<int> derivedKeyBytes = await derivedKey.extractBytes();
+
+  return Uint8List.fromList(derivedKeyBytes);
 }
 
 //
 // AEAD functions
 //
 
-/// ChaCha20-Poly1305 encryption
-Future<Tuple2<Uint8List, Uint8List>> _chaCha20Poly1305Encrypt(Uint8List key, Uint8List nonce, Uint8List plaintext, String aad) async {
-  final SecretBox box = await Cryptography.instance.chacha20Poly1305Aead().encrypt(
-    plaintext.toList(),
-    secretKey: SecretKey(key.toList()),
+/// XChaCha20-Poly1305 encryption
+Future<SecretBox> _xChaCha20Poly1305Encrypt(Uint8List key, Uint8List nonce, Uint8List plaintext, String aad) async {
+  final Xchacha20 aead = Xchacha20.poly1305Aead();
+  final SecretBox ciphertext = await aead.encrypt(
+    plaintext,
+    secretKey: SecretKey(key),
     nonce: nonce,
     aad: utf8.encode(aad)
   );
 
-  final Uint8List ciphertext = Uint8List.fromList(box.cipherText);
-  final Uint8List tag = Uint8List.fromList(box.mac.bytes);
-
-  return Tuple2<Uint8List, Uint8List>(ciphertext, tag);
+  return ciphertext;
 }
 
-/// ChaCha20-Poly1305 decryption
-Future<Uint8List> _chaCha20Poly1305Decrypt(Uint8List key, Uint8List nonce, Uint8List blob, Uint8List tag, String aad) async {
+/// XChaCha20-Poly1305 decryption
+Future<Uint8List> _xChaCha20Poly1305Decrypt(Uint8List key, SecretBox blob, String aad) async {
+  final Xchacha20 aead = Xchacha20.poly1305Aead();
   try {
-    final List<int> plaintext = await Cryptography.instance.chacha20Poly1305Aead().decrypt(
-      SecretBox(
-        blob.toList(),
-        nonce: nonce,
-        mac: Mac(tag)),
+    final List<int> plaintext = await aead.decrypt(
+      blob,
       secretKey: SecretKey(key),
       aad: utf8.encode(aad)
     );
 
     return Uint8List.fromList(plaintext);
-  } catch(_) {
+  } on SecretBoxAuthenticationError {
     throw FailedDecryption();
   }
 }
@@ -256,7 +252,8 @@ Future<Uint8List> _blake2b(PackageData data, String aad) async {
     throw BadAadLength();
   }
   
-  final HashSink streamer = Blake2b().newHashSink();
+  final Blake2b hasher = Blake2b();
+  final HashSink streamer = hasher.newHashSink();
   streamer.add(<int>[aad.length]);
   streamer.add(utf8.encode(aad));
   streamer.add(<int>[data.parameters.version]);
@@ -267,7 +264,7 @@ Future<Uint8List> _blake2b(PackageData data, String aad) async {
   streamer.close();
   final Hash checksum = await streamer.hash();
 
-  return Future<Uint8List>(() => Uint8List.fromList(checksum.bytes));
+  return Uint8List.fromList(checksum.bytes);
 }
 
 //
@@ -281,14 +278,14 @@ Future<Tuple2<PackageData, Uint8List>> encryptRaw(String passphrase, Uint8List p
 
   // Use the PBKDF to derive an AEAD key from the passphrase
   final Uint8List pbkdfSalt = randomBytes(parameters.pbkdfSaltSize);
-  final Uint8List derivedKey = await parameters.pbkdf(passphrase, pbkdfSalt);
+  final Uint8List derivedKey = await parameters.pbkdf(Uint8List.fromList(utf8.encode(passphrase)), pbkdfSalt);
   
   // Use the AEAD to encrypt the plaintext
   final Uint8List aeadNonce = randomBytes(parameters.aeadNonceSize);
-  final Tuple2<Uint8List, Uint8List> ciphertext = await parameters.aeadEncrypt(derivedKey, aeadNonce, plaintext); // (blob, tag)
+  final SecretBox blob = await parameters.aeadEncrypt(derivedKey, aeadNonce, plaintext);
 
   // Assemble data and add the checksum
-  final PackageData data = PackageData(parameters, pbkdfSalt, aeadNonce, ciphertext.item2, ciphertext.item1);
+  final PackageData data = PackageData(parameters, pbkdfSalt, aeadNonce, Uint8List.fromList(blob.mac.bytes), Uint8List.fromList(blob.cipherText));
   final Uint8List checksum = await parameters.checksum(data);
 
   // Encode and return the data
@@ -310,10 +307,15 @@ Future<Uint8List> decrypt(String passphrase, Uint8List bytes) async {
   final PackageData data = await _parseBytes(bytes);
 
   // Use the PBKDF to derive an AEAD key from the passphrase
-  final Uint8List derivedKey = await data.parameters.pbkdf(passphrase, data.pbkdfSalt);
+  final Uint8List derivedKey = await data.parameters.pbkdf(Uint8List.fromList(utf8.encode(passphrase)), data.pbkdfSalt);
 
   // Use the AEAD to authenticate and decrypt the plaintext; this can fail
-  final Uint8List plaintext = await data.parameters.aeadDecrypt(derivedKey, data.aeadNonce, data.ciphertext, data.aeadTag);
+  final blob = SecretBox(
+    data.ciphertext,
+    nonce: data.aeadNonce,
+    mac: Mac(data.aeadTag)
+  );
+  final Uint8List plaintext = await data.parameters.aeadDecrypt(derivedKey, blob);
 
   return Uint8List.fromList(plaintext);
 }
